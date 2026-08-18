@@ -7,7 +7,7 @@ const mangayomiSources = [{
   "iconUrl": "https://www.bilinovel.com/favicon.ico",
   "typeSource": "single",
   "itemType": 2,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "pkgPath": "novel/src/zh/bilinovel.js",
   "isNsfw": false,
   "hasCloudflare": true,
@@ -245,22 +245,79 @@ class DefaultExtension extends MProvider {
     return this._cleanChapter(content.innerHtml, pageUrl);
   }
 
-  async getHtmlContent(name, url) {
-    const client = new Client();
+  _chapterKey(url) {
+    const match = String(url).match(/\/novel\/(\d+)\/(\d+)(?:_\d+)?\.html/i);
+    return match ? `${match[1]}/${match[2]}` : "";
+  }
+
+  _absoluteFromPage(path, pageUrl) {
+    const value = String(path || "").replace(/&amp;/gi, "&");
+    if (!value) return "";
+    if (/^https?:\/\//i.test(value)) return value;
+    if (value.startsWith("//")) return `https:${value}`;
+    const originMatch = String(pageUrl).match(/^(https?:\/\/[^/]+)/i);
+    const origin = originMatch ? originMatch[1] : this.source.baseUrl;
+    if (value.startsWith("/")) return `${origin}${value}`;
+    return `${String(pageUrl).replace(/[?#].*$/, "").replace(/[^/]*$/, "")}${value}`;
+  }
+
+  _nextChapterPage(body, pageUrl, chapterKey) {
+    const linkRegex = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+    let link;
+    while ((link = linkRegex.exec(String(body))) !== null) {
+      const text = link[2].replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").trim();
+      if (text !== "下一页") continue;
+      const href = link[1].match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      const nextUrl = this._absoluteFromPage(href ? (href[1] || href[2] || href[3]) : "", pageUrl);
+      if (nextUrl && this._chapterKey(nextUrl) === chapterKey) return nextUrl;
+    }
+    return "";
+  }
+
+  _responseUrl(response, fallback) {
+    return response && response.request && response.request.url
+      ? response.request.url
+      : fallback;
+  }
+
+  async _loadChapterPage(client, url) {
     let res = await client.get(url, this.getHeaders(url));
-    let html = this._contentFromBody(res.body, url);
+    let pageUrl = this._responseUrl(res, url);
+    let html = this._contentFromBody(res.body, pageUrl);
 
     if (!html) {
       const desktopUrl = url.replace("www.bilinovel.com", "www.linovelib.com");
       if (desktopUrl !== url) {
         res = await client.get(desktopUrl, this.getHeaders(desktopUrl));
-        html = this._contentFromBody(res.body, desktopUrl);
+        pageUrl = this._responseUrl(res, desktopUrl);
+        html = this._contentFromBody(res.body, pageUrl);
       }
     }
-    if (!html) {
+    return { body: res.body, html, pageUrl };
+  }
+
+  async getHtmlContent(name, url) {
+    const client = new Client();
+    let page = await this._loadChapterPage(client, url);
+    if (!page.html) {
       throw new Error("章节正文触发浏览器校验，请先用 Mangayomi WebView 打开本章，或在扩展设置中填写 Cookie。 ");
     }
-    return `<div>${html}</div>`;
+
+    const chapterKey = this._chapterKey(page.pageUrl) || this._chapterKey(url);
+    const htmlPages = [page.html];
+    const visited = {};
+    visited[page.pageUrl] = true;
+    let nextUrl = this._nextChapterPage(page.body, page.pageUrl, chapterKey);
+    while (nextUrl && !visited[nextUrl]) {
+      visited[nextUrl] = true;
+      page = await this._loadChapterPage(client, nextUrl);
+      if (!page.html) {
+        throw new Error("章节分页正文加载失败，请稍后重试或更新 Cookie。 ");
+      }
+      htmlPages.push(page.html);
+      nextUrl = this._nextChapterPage(page.body, page.pageUrl, chapterKey);
+    }
+    return `<div>${htmlPages.join("<br>")}</div>`;
   }
 
   async cleanHtmlContent(html) {

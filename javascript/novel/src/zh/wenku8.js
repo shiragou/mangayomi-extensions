@@ -7,7 +7,7 @@ const mangayomiSources = [{
   "iconUrl": "https://www.wenku8.net/favicon.ico",
   "typeSource": "single",
   "itemType": 2,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "pkgPath": "novel/src/zh/wenku8.js",
   "isNsfw": false,
   "hasCloudflare": false,
@@ -236,18 +236,22 @@ class DefaultExtension extends MProvider {
   }
 
   _chapterPageContent(body) {
-    const first = String(body).match(/\[\d+\/\d+\]/);
+    const source = String(body);
+    const first = source.match(/\[\d+\/\d+\]/);
     if (!first) return "";
     const firstIndex = first.index + first[0].length;
-    const firstBreak = body.indexOf("<br", firstIndex);
+    const firstBreak = source.indexOf("<br", firstIndex);
     if (firstBreak < 0) return "";
-    const start = body.indexOf(">", firstBreak) + 1;
+    const start = source.indexOf(">", firstBreak) + 1;
     const nextRegex = /\[\d+\/\d+\]/g;
     nextRegex.lastIndex = start;
-    const next = nextRegex.exec(body);
-    let end = next ? body.lastIndexOf("<a", next.index) : body.indexOf("<p align=", start);
-    if (end < start) end = body.length;
-    return body.slice(start, end).trim();
+    const next = nextRegex.exec(source);
+    let end = next ? next.index : source.indexOf("<p align=", start);
+    if (end < start) end = source.length;
+    return source.slice(start, end)
+      .replace(/<a\b[^>]*title=["'](?:上页|下页)["'][^>]*>\s*(?:上页|下页)\s*<\/a>\s*$/i, "")
+      .replace(/\r/g, "")
+      .trim();
   }
 
   _normalizeChapterImages(html) {
