@@ -7,11 +7,11 @@ const mangayomiSources = [{
   "iconUrl": "https://www.bilinovel.com/favicon.ico",
   "typeSource": "single",
   "itemType": 2,
-  "version": "0.0.1",
+  "version": "0.0.2",
   "pkgPath": "novel/src/zh/bilinovel.js",
   "isNsfw": false,
   "hasCloudflare": true,
-  "notes": "搜索和部分章节有浏览器校验；扩展已处理搜索校验，章节校验时请使用 Mangayomi WebView 或填写 Cookie。"
+  "notes": ""
 }];
 
 class DefaultExtension extends MProvider {
@@ -204,33 +204,57 @@ class DefaultExtension extends MProvider {
     };
   }
 
-  _cleanChapter(html) {
-    return String(html)
+  _normalizeChapterImages(html, pageUrl) {
+    const originMatch = String(pageUrl || "").match(/^(https?:\/\/[^/]+)/i);
+    const baseUrl = originMatch ? originMatch[1] : this.source.baseUrl;
+    return String(html).replace(/<img\b[^>]*>/gi, (tag) => {
+      const lazy = tag.match(/\s(?:data-src|data-original|data-lazy-src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      const regular = tag.match(/\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      let source = lazy ? (lazy[1] || lazy[2] || lazy[3] || "") : "";
+      if (!source && regular) source = regular[1] || regular[2] || regular[3] || "";
+      source = source.trim().replace(/&amp;/gi, "&");
+      if (!source) return tag;
+
+      const resolved = /^data:/i.test(source)
+        ? source
+        : this._absolute(source, baseUrl).replace(/^http:/i, "https:");
+      const escaped = resolved.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+      const attributes = tag
+        .replace(/^<img\b/i, "")
+        .replace(/\/?>\s*$/, "")
+        .replace(/\s(?:src|data-src|data-original|data-lazy-src|srcset|data-srcset)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "");
+      return `<img${attributes} src="${escaped}">`;
+    });
+  }
+
+  _cleanChapter(html, pageUrl) {
+    const cleaned = String(html)
       .replace(/<script\b[\s\S]*?<\/script>/gi, "")
       .replace(/<iframe\b[\s\S]*?<\/iframe>/gi, "")
       .replace(/<ins\b[\s\S]*?<\/ins>/gi, "")
       .replace(/<div\b[^>]*class=["'][^"']*(?:google-auto-placed|ap_container)[^"']*["'][^>]*>[\s\S]*?<\/div>/gi, "");
+    return this._normalizeChapterImages(cleaned, pageUrl);
   }
 
-  _contentFromBody(body) {
+  _contentFromBody(body, pageUrl) {
     const doc = new Document(body);
     const content = doc.selectFirst("#TextContent, #acontent");
     const text = content.text.trim();
     if (!text) return "";
     if (/內容加載失敗|内容加载失败|內容載入失敗/.test(text)) return "";
-    return this._cleanChapter(content.innerHtml);
+    return this._cleanChapter(content.innerHtml, pageUrl);
   }
 
   async getHtmlContent(name, url) {
     const client = new Client();
     let res = await client.get(url, this.getHeaders(url));
-    let html = this._contentFromBody(res.body);
+    let html = this._contentFromBody(res.body, url);
 
     if (!html) {
       const desktopUrl = url.replace("www.bilinovel.com", "www.linovelib.com");
       if (desktopUrl !== url) {
         res = await client.get(desktopUrl, this.getHeaders(desktopUrl));
-        html = this._contentFromBody(res.body);
+        html = this._contentFromBody(res.body, desktopUrl);
       }
     }
     if (!html) {

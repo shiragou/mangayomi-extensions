@@ -7,11 +7,11 @@ const mangayomiSources = [{
   "iconUrl": "https://www.wenku8.net/favicon.ico",
   "typeSource": "single",
   "itemType": 2,
-  "version": "0.0.1",
+  "version": "0.0.2",
   "pkgPath": "novel/src/zh/wenku8.js",
   "isNsfw": false,
   "hasCloudflare": false,
-  "notes": "排行榜和搜索需要登录。可在扩展设置中填写 Cookie，或填写用户名和密码自动登录。"
+  "notes": ""
 }];
 
 class DefaultExtension extends MProvider {
@@ -250,6 +250,26 @@ class DefaultExtension extends MProvider {
     return body.slice(start, end).trim();
   }
 
+  _normalizeChapterImages(html) {
+    return String(html).replace(/<img\b[^>]*>/gi, (tag) => {
+      const lazy = tag.match(/\s(?:data-src|data-original|data-lazy-src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      const regular = tag.match(/\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      let source = lazy ? (lazy[1] || lazy[2] || lazy[3] || "") : "";
+      if (!source && regular) source = regular[1] || regular[2] || regular[3] || "";
+      source = source.trim().replace(/&amp;/gi, "&");
+      if (!source) return tag;
+
+      const resolved = /^data:/i.test(source) ? source : this._absolute(source);
+      if (/^(?:https?:)?\/\/ia\.51\.la\//i.test(resolved)) return "";
+      const escaped = resolved.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+      const attributes = tag
+        .replace(/^<img\b/i, "")
+        .replace(/\/?>\s*$/, "")
+        .replace(/\s(?:src|data-src|data-original|data-lazy-src|srcset|data-srcset)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "");
+      return `<img${attributes} src="${escaped}">`;
+    });
+  }
+
   _escapeHtml(text) {
     return String(text || "")
       .replace(/&/g, "&amp;")
@@ -270,10 +290,11 @@ class DefaultExtension extends MProvider {
   }
 
   async cleanHtmlContent(html) {
-    return String(html)
+    const cleaned = String(html)
       .replace(/<script\b[\s\S]*?<\/script>/gi, "")
       .replace(/<iframe\b[\s\S]*?<\/iframe>/gi, "")
       .replace(/<ins\b[\s\S]*?<\/ins>/gi, "");
+    return this._normalizeChapterImages(cleaned);
   }
 
   getFilterList() {
