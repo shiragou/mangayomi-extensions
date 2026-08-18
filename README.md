@@ -1,21 +1,15 @@
 # Mangayomi 中文 Novel 扩展
 
-本项目按 `m2k3a/mangayomi-extensions` 的 JavaScript Novel 结构提供两个扩展：
+## 添加扩展
 
-- `javascript/novel/src/zh/wenku8.js`：Wenku8 UTF-8 WAP 接口，支持排行、更新、搜索、详情、分页目录和分页正文；排行与搜索需登录。
-- `javascript/novel/src/zh/bilinovel.js`：哔哩轻小说，支持排行、更新、搜索校验、详情、分卷目录和正文。
+点击下方按钮，将 Novel 扩展仓库添加到 Mangayomi：
 
-## 导入官方仓库
+<a href="https://intradeus.github.io/http-protocol-redirector?r=mangayomi://add-repo?repo_name=mangayomi-extensions%26repo_url=https://github.com/m2k3a/mangayomi-extensions%26novel_url=https://m2k3a.github.io/mangayomi-extensions/novel_index.json"><img alt="添加 Novel 扩展仓库" src="https://raw.githubusercontent.com/m2k3a/mangayomi-extensions/main/images/add-novel-repository.png" height="35"></a>
 
-将两个 JS 文件复制到官方仓库相同路径，运行：
+也可以在 Mangayomi 中进入 **更多 → 设置 → 浏览 → Novel 扩展仓库**，手动添加：
 
 ```text
-dart run source_generator.dart
+https://m2k3a.github.io/mangayomi-extensions/novel_index.json
 ```
 
-提交 JS 文件和生成后的 `novel_index.json`。本项目中的索引 URL 已按官方仓库 `main` 分支生成。
-
-## 登录与浏览器校验
-
-- Wenku8：在 Mangayomi 扩展设置中优先填写 Cookie；也可填写用户名和密码自动登录。密码字段在当前 Mangayomi 中不是掩码输入。
-- 哔哩轻小说：搜索校验由扩展自动完成。若章节返回正文校验页，先用 Mangayomi WebView 打开该章，或在扩展设置中填写 Cookie。
+添加仓库后，在 Novel 扩展列表中安装所需扩展即可。
