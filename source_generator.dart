@@ -23,7 +23,7 @@ void main() {
       source
         ..sourceCodeLanguage = 1
         ..sourceCodeUrl =
-            'https://raw.githubusercontent.com/m2k3a/mangayomi-extensions/$branchName/javascript/${json['pkgPath']}';
+            'https://raw.githubusercontent.com/shiragou/mangayomi-extensions/$branchName/javascript/${json['pkgPath']}';
       sources.add(source);
     }
   }
