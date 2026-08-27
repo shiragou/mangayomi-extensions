@@ -7,7 +7,7 @@ const mangayomiSources = [{
     "iconUrl": "https://www.wenku8.net/favicon.ico",
     "typeSource": "single",
     "itemType": 2,
-    "version": "0.0.8",
+    "version": "0.0.9",
     "pkgPath": "novel/src/zh/wenku8.js",
     "isNsfw": false,
     "hasCloudflare": true,
@@ -414,7 +414,7 @@ class DefaultExtension extends MProvider {
                 const chapterId = chapterMatch && (chapterMatch[1] || chapterMatch[2] || chapterMatch[3]);
                 if (!chapterId || !name) continue;
                 chapters.push({
-                    name,
+                    name: `${chapters.length + 1}. ${name}`,
                     url: this._readerUrl(id, chapterId),
                     dateUpload: "",
                     scanlator: volume
