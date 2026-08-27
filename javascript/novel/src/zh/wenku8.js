@@ -7,7 +7,7 @@ const mangayomiSources = [{
     "iconUrl": "https://www.wenku8.net/favicon.ico",
     "typeSource": "single",
     "itemType": 2,
-    "version": "0.0.6",
+    "version": "0.0.7",
     "pkgPath": "novel/src/zh/wenku8.js",
     "isNsfw": false,
     "hasCloudflare": true,
@@ -24,12 +24,13 @@ class DefaultExtension extends MProvider {
     getHeaders(url) {
         const headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Charset": "utf-8",
             "Accept-Language": "zh-CN,zh;q=0.9",
             "Referer": `${this.source.baseUrl}/`,
             "User-Agent": this.browserUserAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
         };
         let cookie = this._mergeCookies(this.browserCookie, this._preferredCookie(), this.loginCookie);
-        if (cookie && !/(?:^|;\s*)jieqiUserCharset=/i.test(cookie)) {
+        if (cookie) {
             cookie = this._mergeCookies(cookie, "jieqiUserCharset=utf-8");
         }
         if (cookie) headers["Cookie"] = cookie;
@@ -181,8 +182,25 @@ class DefaultExtension extends MProvider {
         return match ? (match[1] || match[2]) : "";
     }
 
+    _chapterIds(url) {
+        const value = String(url);
+        const dynamic = value.match(/[?&]aid=(\d+)[\s\S]*?[?&]cid=(\d+)/i);
+        if (dynamic) return {id: dynamic[1], chapterId: dynamic[2]};
+        const staticUrl = value.match(/\/novel\/\d+\/(\d+)\/(\d+)\.htm/i);
+        return staticUrl ? {id: staticUrl[1], chapterId: staticUrl[2]} : null;
+    }
+
     _coverUrl(id) {
         return `https://img.wenku8.com/image/${Math.floor(Number(id) / 1000)}/${id}/${id}s.jpg`;
+    }
+
+    _detailUrl(id) {
+        return `${this.source.baseUrl}/modules/article/articleinfo.php?id=${id}&charset=utf-8`;
+    }
+
+    _readerUrl(id, chapterId) {
+        const cid = chapterId ? `&cid=${chapterId}` : "";
+        return `${this.source.baseUrl}/modules/article/reader.php?aid=${id}${cid}&charset=utf-8`;
     }
 
     _parseBookList(body, page, responseUrl) {
@@ -193,7 +211,7 @@ class DefaultExtension extends MProvider {
             return {
                 list: [{
                     name: detailName,
-                    link: `${this.source.baseUrl}/book/${detailId}.htm`,
+                    link: this._detailUrl(detailId),
                     imageUrl: this._coverUrl(detailId)
                 }],
                 hasNextPage: false
@@ -214,7 +232,7 @@ class DefaultExtension extends MProvider {
             seen[idMatch[1]] = true;
             list.push({
                 name,
-                link: `${this.source.baseUrl}/book/${idMatch[1]}.htm`,
+                link: this._detailUrl(idMatch[1]),
                 imageUrl: this._coverUrl(idMatch[1])
             });
         }
@@ -229,13 +247,13 @@ class DefaultExtension extends MProvider {
     }
 
     async getPopular(page) {
-        const url = `${this.source.baseUrl}/modules/article/toplist.php?sort=allvisit&page=${page}`;
+        const url = `${this.source.baseUrl}/modules/article/toplist.php?sort=allvisit&charset=utf-8&page=${page}`;
         const res = await this._request(url, "GET", "", true);
         return this._parseBookList(res.body, page, res.request && res.request.url);
     }
 
     async getLatestUpdates(page) {
-        const url = `${this.source.baseUrl}/modules/article/toplist.php?sort=lastupdate&page=${page}`;
+        const url = `${this.source.baseUrl}/modules/article/toplist.php?sort=lastupdate&charset=utf-8&page=${page}`;
         const res = await this._request(url, "GET", "", true);
         return this._parseBookList(res.body, page, res.request && res.request.url);
     }
@@ -248,8 +266,8 @@ class DefaultExtension extends MProvider {
     }
 
     async _getChapters(id) {
-        const baseUrl = `${this.source.baseUrl}/novel/${Math.floor(Number(id) / 1000)}/${id}`;
-        const res = await this._request(`${baseUrl}/index.htm`, "GET", "", true);
+        const catalogUrl = this._readerUrl(id);
+        const res = await this._request(catalogUrl, "GET", "", true);
         const doc = new Document(res.body);
         const chapters = [];
         let volume = "";
@@ -261,13 +279,15 @@ class DefaultExtension extends MProvider {
                     continue;
                 }
                 if (!classes.includes("ccss")) continue;
-                const anchor = cell.selectFirst("a[href$='.htm']");
+                const anchor = cell.selectFirst("a[href]");
                 const href = anchor.attr("href");
                 const name = anchor.text.trim();
-                if (!href || !name) continue;
+                const chapterMatch = href.match(/[?&]cid=(\d+)|\/(\d+)\.htm|^(\d+)\.htm/i);
+                const chapterId = chapterMatch && (chapterMatch[1] || chapterMatch[2] || chapterMatch[3]);
+                if (!chapterId || !name) continue;
                 chapters.push({
                     name,
-                    url: this._absolute(href, `${baseUrl}/index.htm`),
+                    url: this._readerUrl(id, chapterId),
                     dateUpload: "",
                     scanlator: volume
                 });
@@ -283,32 +303,42 @@ class DefaultExtension extends MProvider {
         return 3;
     }
 
+    _detailField(text, names) {
+        const labels = "文库分类|小说分类|小说作者|作者|文章状态|小说状态|最后更新|更新时间|全文长度|全文字数|作品Tags|作品热度|最近章节|内容简介";
+        for (const name of names) {
+            const match = String(text).match(new RegExp(`${name}\\s*[：:]\\s*([\\s\\S]*?)(?=(?:${labels})\\s*[：:]|$)`));
+            if (match && match[1].trim()) return match[1].trim();
+        }
+        return "";
+    }
+
     async getDetail(url) {
-        const res = await this._request(url, "GET", "", true);
+        const id = this._bookId(url);
+        const detailUrl = this._detailUrl(id);
+        const res = await this._request(detailUrl, "GET", "", true);
         const body = res.body;
         const doc = new Document(body);
-        const id = this._bookId(url);
         const content = doc.selectFirst("#content");
         const text = content.text;
         const name = content.selectFirst("span b").text.trim();
         const image = content.selectFirst("img").attr("src");
-        const authorMatch = text.match(/(?:小说作者|作者)\s*[：:]\s*([^\s]+)/);
-        const genreMatch = text.match(/(?:文库分类|小说分类)\s*[：:]\s*([^\s]+)/);
-        const statusMatch = text.match(/(?:文章状态|小说状态)\s*[：:]\s*([^\s]+)/);
+        const author = this._detailField(text, ["小说作者", "作者"]);
+        const genre = this._detailField(text, ["文库分类", "小说分类"]);
+        const status = this._detailField(text, ["文章状态", "小说状态"]);
         const descriptionMatch = body.match(/内容简介\s*[：:]?[\s\S]*?<\/span>\s*<br\s*\/?>\s*<span[^>]*>([\s\S]*?)<\/span>/i);
         const fallbackDescription = content.selectFirst("#contentmain").text.trim();
 
         return {
             name,
-            link: `${this.source.baseUrl}/book/${id}.htm`,
-            imageUrl: image ? this._absolute(image, url) : this._coverUrl(id),
+            link: detailUrl,
+            imageUrl: image ? this._absolute(image, detailUrl) : this._coverUrl(id),
             description: descriptionMatch
                 ? this._decodeText(descriptionMatch[1].replace(/<br\s*\/?>/gi, "\n"))
                 : fallbackDescription,
-            author: authorMatch ? this._decodeText(authorMatch[1]) : "",
+            author,
             artist: "",
-            genre: genreMatch ? [this._decodeText(genreMatch[1])] : [],
-            status: this._toStatus(statusMatch ? statusMatch[1] : ""),
+            genre: genre ? [genre] : [],
+            status: this._toStatus(status),
             chapters: await this._getChapters(id)
         };
     }
@@ -349,10 +379,12 @@ class DefaultExtension extends MProvider {
     }
 
     async getHtmlContent(name, url) {
-        const res = await this._request(url, "GET", "", true);
+        const ids = this._chapterIds(url);
+        const chapterUrl = ids ? this._readerUrl(ids.id, ids.chapterId) : url;
+        const res = await this._request(chapterUrl, "GET", "", true);
         const html = this._chapterContent(res.body);
         if (!html) throw new Error("Wenku8 主站章节正文加载失败，请稍后重试。 ");
-        return this.cleanHtmlContent(`<div><h2>${this._escapeHtml(name)}</h2><hr>${html}</div>`, url);
+        return this.cleanHtmlContent(`<div><h2>${this._escapeHtml(name)}</h2><hr>${html}</div>`, chapterUrl);
     }
 
     async cleanHtmlContent(html, pageUrl) {
