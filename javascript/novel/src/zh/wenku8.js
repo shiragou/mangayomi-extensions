@@ -7,14 +7,17 @@ const mangayomiSources = [{
     "iconUrl": "https://www.wenku8.net/favicon.ico",
     "typeSource": "single",
     "itemType": 2,
-    "version": "0.0.5",
+    "version": "0.0.6",
     "pkgPath": "novel/src/zh/wenku8.js",
     "isNsfw": false,
-    "hasCloudflare": false,
+    "hasCloudflare": true,
     "notes": ""
 }];
 
 class DefaultExtension extends MProvider {
+    browserCookie = "";
+    browserUserAgent = "";
+    cookiesBootstrapped = false;
     loginCookie = "";
     loginAttempted = false;
 
@@ -23,12 +26,13 @@ class DefaultExtension extends MProvider {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9",
             "Referer": `${this.source.baseUrl}/`,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+            "User-Agent": this.browserUserAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
         };
-        const cookie = this._preferredCookie() || this.loginCookie;
-        headers["Cookie"] = /(?:^|;\s*)jieqiUserCharset=/i.test(cookie)
-            ? cookie
-            : ["jieqiUserCharset=utf-8", cookie].filter((value) => value).join("; ");
+        let cookie = this._mergeCookies(this.browserCookie, this._preferredCookie(), this.loginCookie);
+        if (cookie && !/(?:^|;\s*)jieqiUserCharset=/i.test(cookie)) {
+            cookie = this._mergeCookies(cookie, "jieqiUserCharset=utf-8");
+        }
+        if (cookie) headers["Cookie"] = cookie;
         return headers;
     }
 
@@ -44,6 +48,20 @@ class DefaultExtension extends MProvider {
         return this._preference("wenku8_cookie").replace(/^Cookie:\s*/i, "");
     }
 
+    _mergeCookies(...values) {
+        const jar = {};
+        for (const value of values) {
+            for (const part of String(value || "").split(";")) {
+                const separator = part.indexOf("=");
+                if (separator <= 0) continue;
+                const name = part.slice(0, separator).trim();
+                const cookieValue = part.slice(separator + 1).trim();
+                if (name) jar[name] = cookieValue;
+            }
+        }
+        return Object.keys(jar).map((name) => `${name}=${jar[name]}`).join("; ");
+    }
+
     _cookieFromResponse(res) {
         const raw = String((res.headers && (res.headers["set-cookie"] || res.headers["Set-Cookie"])) || "");
         const cookies = [];
@@ -55,9 +73,40 @@ class DefaultExtension extends MProvider {
         return cookies.join("; ");
     }
 
+    _cookieFromRequest(res) {
+        const headers = res && res.request && res.request.headers;
+        return String((headers && (headers["cookie"] || headers["Cookie"])) || "");
+    }
+
+    _userAgentFromRequest(res) {
+        const headers = res && res.request && res.request.headers;
+        return String((headers && (headers["user-agent"] || headers["User-Agent"])) || "");
+    }
+
+    async _bootstrapCookies() {
+        if (this.cookiesBootstrapped) return;
+
+        const url = `${this.source.baseUrl}/login.php`;
+        const headers = this.getHeaders(url);
+        delete headers["Cookie"];
+        delete headers["User-Agent"];
+        const res = await new Client().get(url, headers);
+        this.browserCookie = this._mergeCookies(
+            this._cookieFromRequest(res),
+            this._cookieFromResponse(res)
+        );
+        this.browserUserAgent = this._userAgentFromRequest(res);
+        this.cookiesBootstrapped = true;
+    }
+
     async _login() {
         if (this.loginAttempted) return this.loginCookie;
         this.loginAttempted = true;
+
+        await this._bootstrapCookies();
+        if (/(?:^|;\s*)jieqiUserInfo=/i.test(this.browserCookie)) {
+            return this.browserCookie;
+        }
 
         const username = this._preference("wenku8_username");
         const password = this._preference("wenku8_password");
@@ -76,17 +125,22 @@ class DefaultExtension extends MProvider {
             ...this.getHeaders(url),
             "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"
         };
-        const res = await new Client({useDartHttpClient: true, followRedirects: false}).post(url, headers, body);
-        this.loginCookie = this._cookieFromResponse(res);
-        if (!/(?:^|;\s*)jieqiUserInfo=/i.test(this.loginCookie)) {
+        const res = await new Client({followRedirects: false}).post(url, headers, body);
+        const responseCookie = this._cookieFromResponse(res);
+        if (!/(?:^|;\s*)jieqiUserInfo=/i.test(responseCookie)) {
             this.loginCookie = "";
             throw new Error("Wenku8 登录失败：请检查用户名和密码。 ");
         }
+        this.loginCookie = responseCookie;
         return this.loginCookie;
     }
 
     async _request(url, method, body, requiresLogin) {
-        if (requiresLogin && !this._preferredCookie() && !this.loginCookie) {
+        await this._bootstrapCookies();
+        const hasLoginCookie = /(?:^|;\s*)jieqiUserInfo=/i.test(
+            this._mergeCookies(this.browserCookie, this._preferredCookie(), this.loginCookie)
+        );
+        if (requiresLogin && !hasLoginCookie && !this._preferredCookie() && !this.loginCookie) {
             await this._login();
         }
         const client = new Client();
