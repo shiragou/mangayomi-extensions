@@ -7,7 +7,7 @@ const mangayomiSources = [{
     "iconUrl": "https://www.wenku8.net/favicon.ico",
     "typeSource": "single",
     "itemType": 2,
-    "version": "0.0.3",
+    "version": "0.0.5",
     "pkgPath": "novel/src/zh/wenku8.js",
     "isNsfw": false,
     "hasCloudflare": false,
@@ -20,13 +20,15 @@ class DefaultExtension extends MProvider {
 
     getHeaders(url) {
         const headers = {
-            "Accept": "text/vnd.wap.wml,application/xhtml+xml,text/html;q=0.9,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9",
-            "Referer": `${this.source.baseUrl}/wap/`,
-            "User-Agent": "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36"
+            "Referer": `${this.source.baseUrl}/`,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
         };
         const cookie = this._preferredCookie() || this.loginCookie;
-        if (cookie) headers["Cookie"] = cookie;
+        headers["Cookie"] = /(?:^|;\s*)jieqiUserCharset=/i.test(cookie)
+            ? cookie
+            : ["jieqiUserCharset=utf-8", cookie].filter((value) => value).join("; ");
         return headers;
     }
 
@@ -61,21 +63,24 @@ class DefaultExtension extends MProvider {
         const password = this._preference("wenku8_password");
         if (!username || !password) return "";
 
-        const url = `${this.source.baseUrl}/wap/login.php`;
+        const jumpUrl = encodeURIComponent(`${this.source.baseUrl}/index.php`);
+        const url = `${this.source.baseUrl}/login.php?do=submit&jumpurl=${jumpUrl}`;
         const body = [
-            "action=login",
-            "jumpurl=%2Fwap%2F",
             `username=${encodeURIComponent(username)}`,
-            `password=${encodeURIComponent(password)}`
+            `password=${encodeURIComponent(password)}`,
+            "usecookie=315360000",
+            "action=login",
+            `submit=${encodeURIComponent(" 登 录 ")}`
         ].join("&");
         const headers = {
             ...this.getHeaders(url),
             "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"
         };
-        const res = await new Client({followRedirects: false}).post(url, headers, body);
+        const res = await new Client({useDartHttpClient: true, followRedirects: false}).post(url, headers, body);
         this.loginCookie = this._cookieFromResponse(res);
-        if (!this.loginCookie) {
-            throw new Error("Wenku8 登录失败：未收到登录 Cookie，请检查用户名和密码，或直接填写 Cookie。 ");
+        if (!/(?:^|;\s*)jieqiUserInfo=/i.test(this.loginCookie)) {
+            this.loginCookie = "";
+            throw new Error("Wenku8 登录失败：请检查用户名和密码。 ");
         }
         return this.loginCookie;
     }
@@ -93,18 +98,24 @@ class DefaultExtension extends MProvider {
             }, body)
             : await client.get(url, headers);
 
-        if (requiresLogin && /<card[^>]+title=["'](?:会员登录|登录)["']|name=["']username["']/i.test(res.body)) {
+        const finalUrl = String((res.request && res.request.url) || "");
+        const isLoginPage = /\/login\.php(?:[?#]|$)/i.test(finalUrl)
+            || (/<title>[^<]*(?:会员登录|登录)[^<]*<\/title>/i.test(res.body)
+                && /name=["']username["']/i.test(res.body)
+                && /name=["']password["']/i.test(res.body));
+        if (requiresLogin && isLoginPage) {
             throw new Error("Wenku8 需要登录：请在扩展设置中填写 Cookie，或填写用户名和密码。 ");
         }
         return res;
     }
 
-    _absolute(path) {
+    _absolute(path, pageUrl) {
         if (!path) return "";
         if (/^https?:\/\//i.test(path)) return path.replace(/^http:/i, "https:");
         if (path.startsWith("//")) return `https:${path}`;
         if (path.startsWith("/")) return `${this.source.baseUrl}${path}`;
-        return `${this.source.baseUrl}/wap/article/${path}`;
+        const base = String(pageUrl || `${this.source.baseUrl}/`).replace(/[?#].*$/, "");
+        return `${base.replace(/[^/]*$/, "")}${path}`;
     }
 
     _decodeText(html) {
@@ -112,95 +123,101 @@ class DefaultExtension extends MProvider {
     }
 
     _bookId(url) {
-        const match = String(url).match(/[?&](?:id|aid)=(\d+)/i);
-        return match ? match[1] : "";
+        const match = String(url).match(/\/book\/(\d+)\.htm|[?&](?:id|aid)=(\d+)/i);
+        return match ? (match[1] || match[2]) : "";
     }
 
     _coverUrl(id) {
         return `https://img.wenku8.com/image/${Math.floor(Number(id) / 1000)}/${id}/${id}s.jpg`;
     }
 
-    _totalPages(body) {
-        const match = String(body).match(/\[(\d+)\/(\d+)\]/);
-        return match ? Number(match[2]) : 1;
-    }
-
-    _parseBookList(body) {
+    _parseBookList(body, page, responseUrl) {
         const doc = new Document(body);
+        const detailId = this._bookId(responseUrl);
+        const detailName = doc.selectFirst("#content span b").text.trim();
+        if (detailId && detailName) {
+            return {
+                list: [{
+                    name: detailName,
+                    link: `${this.source.baseUrl}/book/${detailId}.htm`,
+                    imageUrl: this._coverUrl(detailId)
+                }],
+                hasNextPage: false
+            };
+        }
+
         const seen = {};
         const list = [];
-        for (const element of doc.select("a[href*='articleinfo.php?id=']")) {
+        for (const element of doc.select("table.grid a[href*='/book/'][href$='.htm']")) {
             const href = element.attr("href");
-            const idMatch = href.match(/[?&]id=(\d+)/i);
+            const idMatch = href.match(/\/book\/(\d+)\.htm/i);
             if (!idMatch || seen[idMatch[1]]) continue;
-            seen[idMatch[1]] = true;
-            const name = element.text.trim().replace(/^《|》$/g, "");
+            const name = (element.attr("tiptitle") || element.attr("title") || element.text)
+                .trim()
+                .replace(/^《|》$/g, "");
+            if (/^(?:我要阅读|加入书架|推荐本书)$/.test(name)) continue;
             if (!name) continue;
+            seen[idMatch[1]] = true;
             list.push({
                 name,
-                link: `${this.source.baseUrl}/wap/article/articleinfo.php?id=${idMatch[1]}`,
+                link: `${this.source.baseUrl}/book/${idMatch[1]}.htm`,
                 imageUrl: this._coverUrl(idMatch[1])
             });
         }
-        const page = String(body).match(/\[(\d+)\/(\d+)\]/);
+
+        const nextPage = Number(page || 1) + 1;
+        const hasNext = new RegExp(`[?&]page=${nextPage}(?:[&"']|$)`, "i").test(body)
+            || /<a\b[^>]*>\s*(?:下一页|下页|Next)\s*<\/a>/i.test(body);
         return {
             list,
-            hasNextPage: !!page && Number(page[1]) < Number(page[2])
+            hasNextPage: hasNext
         };
     }
 
     async getPopular(page) {
-        const url = `${this.source.baseUrl}/wap/article/toplist.php?sort=allvisit&page=${page}`;
+        const url = `${this.source.baseUrl}/modules/article/toplist.php?sort=allvisit&page=${page}`;
         const res = await this._request(url, "GET", "", true);
-        return this._parseBookList(res.body);
+        return this._parseBookList(res.body, page, res.request && res.request.url);
     }
 
     async getLatestUpdates(page) {
-        const url = `${this.source.baseUrl}/wap/article/toplist.php?sort=lastupdate&page=${page}`;
+        const url = `${this.source.baseUrl}/modules/article/toplist.php?sort=lastupdate&page=${page}`;
         const res = await this._request(url, "GET", "", true);
-        return this._parseBookList(res.body);
+        return this._parseBookList(res.body, page, res.request && res.request.url);
     }
 
     async search(query, page, filters) {
-        const url = `${this.source.baseUrl}/wap/article/search.php`;
-        const body = [
-            "action=search",
-            "searchtype=articlename",
-            `searchkey=${encodeURIComponent(query.trim())}`,
-            `page=${page}`
-        ].join("&");
-        const res = await this._request(url, "POST", body, true);
-        return this._parseBookList(res.body);
-    }
-
-    _parseCatalogPage(body, chapters, state) {
-        const regex = /〖([^〗]+)〗|<a\b[^>]*href=["']readchapter\.php\?aid=(\d+)&(?:amp;)?cid=(\d+)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
-        let match;
-        while ((match = regex.exec(body)) !== null) {
-            if (match[1]) {
-                state.volume = this._decodeText(match[1]);
-                continue;
-            }
-            chapters.push({
-                name: this._decodeText(match[4]),
-                url: `${this.source.baseUrl}/wap/article/readchapter.php?aid=${match[2]}&cid=${match[3]}`,
-                dateUpload: "",
-                scanlator: state.volume
-            });
-        }
+        const keyword = encodeURIComponent(query.trim());
+        const url = `${this.source.baseUrl}/modules/article/search.php?searchtype=articlename&searchkey=${keyword}&charset=utf-8&page=${page}`;
+        const res = await this._request(url, "GET", "", true);
+        return this._parseBookList(res.body, page, res.request && res.request.url);
     }
 
     async _getChapters(id) {
+        const baseUrl = `${this.source.baseUrl}/novel/${Math.floor(Number(id) / 1000)}/${id}`;
+        const res = await this._request(`${baseUrl}/index.htm`, "GET", "", true);
+        const doc = new Document(res.body);
         const chapters = [];
-        const state = {volume: ""};
-        const firstUrl = `${this.source.baseUrl}/wap/article/readbook.php?aid=${id}&page=1`;
-        const first = await this._request(firstUrl, "GET", "", false);
-        this._parseCatalogPage(first.body, chapters, state);
-        const total = this._totalPages(first.body);
-        for (let page = 2; page <= total; page++) {
-            const url = `${this.source.baseUrl}/wap/article/readbook.php?aid=${id}&page=${page}`;
-            const res = await this._request(url, "GET", "", false);
-            this._parseCatalogPage(res.body, chapters, state);
+        let volume = "";
+        for (const row of doc.select("table.css tr")) {
+            for (const cell of row.select("td")) {
+                const classes = cell.attr("class");
+                if (classes.includes("vcss")) {
+                    volume = cell.text.trim();
+                    continue;
+                }
+                if (!classes.includes("ccss")) continue;
+                const anchor = cell.selectFirst("a[href$='.htm']");
+                const href = anchor.attr("href");
+                const name = anchor.text.trim();
+                if (!href || !name) continue;
+                chapters.push({
+                    name,
+                    url: this._absolute(href, `${baseUrl}/index.htm`),
+                    dateUpload: "",
+                    scanlator: volume
+                });
+            }
         }
         return chapters;
     }
@@ -213,23 +230,27 @@ class DefaultExtension extends MProvider {
     }
 
     async getDetail(url) {
-        const res = await this._request(url, "GET", "", false);
+        const res = await this._request(url, "GET", "", true);
         const body = res.body;
         const doc = new Document(body);
-        const card = doc.selectFirst("card");
         const id = this._bookId(url);
-        const name = card.attr("title") || doc.selectFirst("card b").text.trim();
-        const image = doc.selectFirst("card img").attr("src");
-        const authorMatch = body.match(/作者:\s*(?:<anchor[^>]*>)?([^<]+)/i);
-        const genreMatch = body.match(/类别:\s*(?:<a[^>]*>)?([^<]+)/i);
-        const statusMatch = body.match(/状态:\s*([^<]+)/i);
-        const descriptionMatch = body.match(/\[作品简介\]\s*<br\s*\/?>([\s\S]*?)(?:<br\s*\/?>\s*)?<p\s+align=["']center["']/i);
+        const content = doc.selectFirst("#content");
+        const text = content.text;
+        const name = content.selectFirst("span b").text.trim();
+        const image = content.selectFirst("img").attr("src");
+        const authorMatch = text.match(/(?:小说作者|作者)\s*[：:]\s*([^\s]+)/);
+        const genreMatch = text.match(/(?:文库分类|小说分类)\s*[：:]\s*([^\s]+)/);
+        const statusMatch = text.match(/(?:文章状态|小说状态)\s*[：:]\s*([^\s]+)/);
+        const descriptionMatch = body.match(/内容简介\s*[：:]?[\s\S]*?<\/span>\s*<br\s*\/?>\s*<span[^>]*>([\s\S]*?)<\/span>/i);
+        const fallbackDescription = content.selectFirst("#contentmain").text.trim();
 
         return {
             name,
-            link: url,
-            imageUrl: image ? this._absolute(image) : this._coverUrl(id),
-            description: this._decodeText(descriptionMatch ? descriptionMatch[1].replace(/<br\s*\/?>/gi, "\n") : ""),
+            link: `${this.source.baseUrl}/book/${id}.htm`,
+            imageUrl: image ? this._absolute(image, url) : this._coverUrl(id),
+            description: descriptionMatch
+                ? this._decodeText(descriptionMatch[1].replace(/<br\s*\/?>/gi, "\n"))
+                : fallbackDescription,
             author: authorMatch ? this._decodeText(authorMatch[1]) : "",
             artist: "",
             genre: genreMatch ? [this._decodeText(genreMatch[1])] : [],
@@ -238,50 +259,14 @@ class DefaultExtension extends MProvider {
         };
     }
 
-    _chapterPageContent(body) {
-        const source = String(body);
-
-        // 页首分页栏中的 [当前页/总页数]。
-        const first = source.match(/\[\d+\/\d+\]/);
-        if (!first) return "";
-
-        // 正文从页首分页栏结束后的第一个 <br> 之后开始。
-        const firstIndex = first.index + first[0].length;
-        const firstBreak = source.indexOf("<br", firstIndex);
-        if (firstBreak < 0) return "";
-        const firstBreakEnd = source.indexOf(">", firstBreak);
-        if (firstBreakEnd < 0) return "";
-        const start = firstBreakEnd + 1;
-
-        // 查找页尾分页栏的 [当前页/总页数]。
-        // 不再先把“上页/下页”链接切进正文再用正则删除，
-        // 而是直接把页尾分页栏前面的 <br> 当作正文结束边界。
-        const nextPageCounter = /\[\d+\/\d+\]/g;
-        nextPageCounter.lastIndex = start;
-        const next = nextPageCounter.exec(source);
-
-        let end;
-        if (next) {
-            const lastBreak = source.lastIndexOf("<br", next.index);
-            if (lastBreak >= start) {
-                const lastBreakEnd = source.indexOf(">", lastBreak);
-                end = lastBreakEnd >= 0 && lastBreakEnd < next.index
-                    ? lastBreakEnd + 1
-                    : lastBreak;
-            } else {
-                end = next.index;
-            }
-        } else {
-            end = source.indexOf("<p align=", start);
-        }
-
-        if (end < start) end = source.length;
-        return source.slice(start, end)
+    _chapterContent(body) {
+        return new Document(body).selectFirst("#content").innerHtml
+            .replace(/<[^>]+\bid=["']contentdp["'][^>]*>[\s\S]*?<\/[^>]+>/gi, "")
             .replace(/\r/g, "")
             .trim();
     }
 
-    _normalizeChapterImages(html) {
+    _normalizeChapterImages(html, pageUrl) {
         return String(html).replace(/<img\b[^>]*>/gi, (tag) => {
             const lazy = tag.match(/\s(?:data-src|data-original|data-lazy-src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
             const regular = tag.match(/\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
@@ -290,7 +275,7 @@ class DefaultExtension extends MProvider {
             source = source.trim().replace(/&amp;/gi, "&");
             if (!source) return tag;
 
-            const resolved = /^data:/i.test(source) ? source : this._absolute(source);
+            const resolved = /^data:/i.test(source) ? source : this._absolute(source, pageUrl);
             if (/^(?:https?:)?\/\/ia\.51\.la\//i.test(resolved)) return "";
             const escaped = resolved.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
             const attributes = tag
@@ -310,22 +295,18 @@ class DefaultExtension extends MProvider {
     }
 
     async getHtmlContent(name, url) {
-        const first = await this._request(`${url}&page=1`, "GET", "", false);
-        const total = this._totalPages(first.body);
-        let html = this._chapterPageContent(first.body);
-        for (let page = 2; page <= total; page++) {
-            const res = await this._request(`${url}&page=${page}`, "GET", "", false);
-            html += `<br>${this._chapterPageContent(res.body)}`;
-        }
-        return this.cleanHtmlContent(`<div><h2>${this._escapeHtml(name)}</h2><hr>${html}</div>`);
+        const res = await this._request(url, "GET", "", true);
+        const html = this._chapterContent(res.body);
+        if (!html) throw new Error("Wenku8 主站章节正文加载失败，请稍后重试。 ");
+        return this.cleanHtmlContent(`<div><h2>${this._escapeHtml(name)}</h2><hr>${html}</div>`, url);
     }
 
-    async cleanHtmlContent(html) {
+    async cleanHtmlContent(html, pageUrl) {
         const cleaned = String(html)
             .replace(/<script\b[\s\S]*?<\/script>/gi, "")
             .replace(/<iframe\b[\s\S]*?<\/iframe>/gi, "")
             .replace(/<ins\b[\s\S]*?<\/ins>/gi, "");
-        return this._normalizeChapterImages(cleaned);
+        return this._normalizeChapterImages(cleaned, pageUrl);
     }
 
     getFilterList() {
@@ -338,7 +319,7 @@ class DefaultExtension extends MProvider {
                 key: "wenku8_cookie",
                 editTextPreference: {
                     title: "Wenku8 Cookie（优先）",
-                    summary: "填写浏览器中的 Cookie 字符串；留空时尝试用户名和密码。",
+                    summary: "填写浏览器中的 Cookie 字符串；留空时自动使用用户名和密码登录网页版。",
                     value: "",
                     dialogTitle: "Wenku8 Cookie",
                     dialogMessage: "格式：name=value; name2=value2"
@@ -348,7 +329,7 @@ class DefaultExtension extends MProvider {
                 key: "wenku8_username",
                 editTextPreference: {
                     title: "Wenku8 用户名",
-                    summary: "仅在 Cookie 留空时使用。",
+                    summary: "仅在 Cookie 留空时用于自动登录网页版。",
                     value: "",
                     dialogTitle: "Wenku8 用户名",
                     dialogMessage: ""
